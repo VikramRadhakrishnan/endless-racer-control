@@ -25,11 +25,14 @@ Environment recap
 - ``info`` dict: includes (in obstacles-on mode) ``"obstacles"``, the
   relative ``(dx, dy)`` positions of the visible traffic cars, used by the
   classical planner.
+- Reward shaping: ``shape_reward`` (default: a no-op) can reshape the reward
+  the RL agent trains on, without touching the environment.
 """
 
 import math
 import os
 
+import gymnasium as gym
 import numpy as np
 
 from racer_env import NO_OBSTACLE_ANGLE
@@ -264,7 +267,70 @@ class PIDController:
 
 
 # ---------------------------------------------------------------------------
-# 4. Reinforcement learning control (Stable-Baselines3 PPO)
+# 4. Reward shaping (used during RL training)
+# ---------------------------------------------------------------------------
+def shape_reward(reward, observation, action, info, terminated, truncated):
+    """Optionally reshape the per-step reward used for RL training.
+
+    Reward shaping injects domain knowledge into the *learning signal* to
+    guide the agent or speed up training, without modifying the environment
+    itself. It is applied to every step's reward during RL training only (via
+    ``RewardShapingWrapper``); the environment's own reward -- and the reward
+    shown in the GUI and used for evaluation -- is left untouched.
+
+    The default implementation does nothing: it returns the environment
+    reward unchanged, so training uses the raw reward (+1 per surviving step,
+    a large penalty on collision). Edit the body to experiment with shaping.
+
+    Parameters
+    ----------
+    reward : float
+        The reward returned by the environment for this step.
+    observation : numpy.ndarray
+        The observation after the step (``[offset]`` or
+        ``[offset, angle_1, ...]``).
+    action : numpy.ndarray
+        The action that was taken (the steering command).
+    info : dict
+        The environment's ``info`` dict (``lateral_offset``, ``heading``,
+        ``distance``, ...).
+    terminated, truncated : bool
+        The episode-end flags from the environment step.
+
+    Returns
+    -------
+    float
+        The (possibly reshaped) reward to train on.
+    """
+    # Default: use the environment reward as-is. To experiment, return a
+    # modified value, e.g. encourage staying near the centre line:
+    #
+    #     return reward - 0.1 * abs(info["lateral_offset"])
+    #
+    # or discourage large/jerky steering commands:
+    #
+    #     return reward - 0.01 * float(action[0]) ** 2
+    return reward
+
+
+class RewardShapingWrapper(gym.Wrapper):
+    """Gymnasium wrapper that applies :func:`shape_reward` to every step.
+
+    Wrapping the training environment in this means the PPO agent learns from
+    the reshaped reward, while the underlying environment (and everything else
+    that uses it, such as the live GUI) keeps returning the original reward.
+    """
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        reward = shape_reward(
+            reward, observation, action, info, terminated, truncated
+        )
+        return observation, reward, terminated, truncated, info
+
+
+# ---------------------------------------------------------------------------
+# 5. Reinforcement learning control (Stable-Baselines3 PPO)
 # ---------------------------------------------------------------------------
 def train_rl_agent(env, hyperparams, total_timesteps, save_path, callback=None):
     """Train a PPO agent on ``env`` and save it to ``save_path``.
@@ -291,6 +357,10 @@ def train_rl_agent(env, hyperparams, total_timesteps, save_path, callback=None):
         The trained model.
     """
     from stable_baselines3 import PPO
+
+    # Train on the (optionally) reshaped reward. Wrapping here means the user
+    # only needs to edit ``shape_reward`` to change the training signal.
+    env = RewardShapingWrapper(env)
 
     model = PPO(
         "MlpPolicy",

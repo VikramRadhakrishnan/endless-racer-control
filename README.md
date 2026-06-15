@@ -69,6 +69,10 @@ observation.
     fallback).
   * `PIDController` -- a PID controller (`compute_action`) with live-tunable
     `kp`/`ki`/`kd` gains that drives the lateral offset to the setpoint.
+  * `shape_reward` -- an optional **reward-shaping** hook applied during RL
+    training (via `RewardShapingWrapper`). It defaults to a no-op (the
+    environment reward is used unchanged); edit it to inject domain knowledge
+    into the learning signal without touching the environment.
   * `train_rl_agent`, `load_rl_agent`, `get_rl_action` -- train/load a
     Stable-Baselines3 PPO agent and query it for actions.
 - **`racer_env.py`** is the Gymnasium-style environment, including the
@@ -168,6 +172,11 @@ experiment. `R` resets the episode immediately, `Esc` returns to the menu.
   model** or **train a new one** (overwriting the checkpoint).
 - After training/loading, the trained agent drives the car in the renderer.
 
+The agent trains on the reward returned by `shape_reward`, which defaults to
+the environment's own reward. Edit `shape_reward` (in the notebooks) to
+experiment with **reward shaping** -- e.g. penalising distance from the
+centre line or large steering commands -- and retrain to see the effect.
+
 Note that the agent never observes the car's heading or the obstacle
 distances -- only the centre-line offset and (in obstacles-on mode) the
 obstacle bearings -- which makes it a genuinely interesting, and partially
@@ -185,6 +194,8 @@ yourself):
    but the body left as `# YOUR CODE HERE` / `raise NotImplementedError`.
 2. Implement `get_manual_action`, `compute_desired_offset`,
    `PIDController`, `train_rl_agent`, `load_rl_agent`, and `get_rl_action`.
+   The `shape_reward` cell is provided with its default no-op behaviour --
+   leave it as-is, or optionally tweak it to experiment with reward shaping.
 3. Run the **export cell** at the end of the notebook -- it writes your
    implementations to `../controllers.py`.
 4. Run `python simulation.py` from the project root to test your
