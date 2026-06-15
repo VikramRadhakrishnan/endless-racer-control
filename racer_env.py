@@ -337,15 +337,22 @@ class EndlessRacerEnv(gym.Env):
             )
             y += period
 
-        # Obstacle cars (red, with a roof patch to look distinct)
+        # Obstacle cars (red, with a roof patch to look distinct). The camera
+        # is fixed on the lane, so cars are drawn at their absolute lateral
+        # position within the lane (cx = lane centre).
         if self.obstacles_on:
             for ob in self._obstacles:
-                ox = cx + (ob["x"] - self.x) * PPM
+                ox = cx + ob["x"] * PPM
                 oy = CAR_SCREEN_Y - ob["y"] * PPM
                 self._draw_car(canvas, ox, oy, 0.0, body="#c1121f", roof="#780000")
 
-        # Our car (blue), rotated by heading
-        self._draw_car(canvas, cx, CAR_SCREEN_Y, self.theta, body="#1d6fd1", roof="#0b3d91")
+        # Our car (blue), drawn at its lateral offset from the lane centre.
+        # The car drifts left/right across the lane (its offset is what moves);
+        # it is drawn upright rather than rotated by the steering heading.
+        self._draw_car(
+            canvas, cx + self.x * PPM, CAR_SCREEN_Y, 0.0,
+            body="#1d6fd1", roof="#0b3d91",
+        )
 
         # HUD
         canvas.create_text(
