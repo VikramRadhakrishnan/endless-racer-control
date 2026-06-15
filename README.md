@@ -18,6 +18,12 @@ Each mode can be played with **obstacles off** (just stay in the lane) or
 **obstacles on** (dodge slower traffic cars, drawn in red so they are
 visually distinct from your blue car), toggled on the main menu.
 
+![The car drifting from the lane centre to the wall with no steering applied](assets/drift.png)
+
+*With no steering input the random drift and wheel slippage push the car
+sideways across the lane -- its lateral offset grows from 0 m at the centre
+line to the right wall, ending the episode in a crash.*
+
 This repository is the companion to
 [inverted-pendulum-control](https://github.com/VikramRadhakrishnan/inverted-pendulum-control)
 and follows the same structure.
