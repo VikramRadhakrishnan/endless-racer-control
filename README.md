@@ -2,9 +2,10 @@
 
 A small Tkinter desktop app built around a custom Gymnasium-style
 environment (`racer_env.py`): a **top-down, vertically scrolling endless
-racer** with random wheel slippage and random drift, so the car never drives
-in a straight line without external control. Three control modes are
-available:
+racer** with random drift and occasional wheel slippage that pushes the car
+to the left or right of the centre line, so it never stays on the track
+without external control. The goal is to keep the car on the track as long
+as possible. Three control modes are available:
 
 1. **Manual control** -- steer the car yourself with the arrow keys (or
    on-screen buttons).
@@ -26,21 +27,23 @@ and follows the same structure.
 The environment (`EndlessRacerEnv` in `racer_env.py`) follows the Gymnasium
 API (`reset`, `step`, `action_space`, `observation_space`):
 
-- **State (obstacles off):** `[theta]` -- the car's heading angle (rad,
-  0 = straight up the track, positive = pointing right).
-- **State (obstacles on):** `[theta, angle_1, ..., angle_5]` -- the heading
-  angle followed by the bearings to each obstacle currently visible in
+- **State (obstacles off):** `[offset]` -- the car's distance from the
+  centre line (m, 0 = lane centre, positive = right of centre).
+- **State (obstacles on):** `[offset, angle_1, ..., angle_5]` -- the centre
+  line offset followed by the bearings to each obstacle currently visible in
   frame, nearest first (positive = obstacle to the right). Unused slots are
   padded with the sentinel `NO_OBSTACLE_ANGLE` (= pi).
 - **Action:** a single steering command in `Box(-1, 1, (1,))`
-  (negative = left, positive = right).
-- **Reward:** the forward distance travelled each step. Colliding with the
-  lane edges -- or with an obstacle, in obstacles-on mode -- ends the episode
-  with a **-100 penalty**.
+  (negative = steer left, positive = steer right).
+- **Reward:** +1 for every step the car stays on the track. Colliding with
+  the lane edges -- or with an obstacle, in obstacles-on mode -- ends the
+  episode with a **-100 penalty**.
 - **Disturbances:** every step the heading and lateral position receive
-  random drift, and with some probability the wheels start *slipping* for a
-  while (steering effectiveness drops to 15-50%), so active control is always
-  needed.
+  small random drift, and with some probability the wheels start *slipping*
+  for a while: steering effectiveness drops to 25-60% and the car drifts
+  towards a random side (left or right) until grip returns, so active
+  control is always needed. Without correction the car gradually wanders
+  off the centre line and crashes into the lane boundary within seconds.
 
 The car's lateral offset from the lane centre and other useful quantities
 are reported in the `info` dict, including (in obstacles-on mode)
@@ -53,13 +56,13 @@ observation.
   the GUI:
   * `get_manual_action(action_space, pressed_keys)` -- maps held arrow
     keys/buttons to a steering command.
-  * `compute_desired_heading(observation, info, obstacles_on)` -- the PID
-    setpoint. With obstacles off it steers the car back to the middle of the
-    lane; with obstacles on, it plans a safe lateral target from the
-    visible traffic (free-gap selection with a reachability rule and a
-    squeeze fallback) and converts the lateral error into a heading.
+  * `compute_desired_offset(observation, info, obstacles_on)` -- the PID
+    setpoint. With obstacles off it is simply the centre line (`0.0`); with
+    obstacles on, it plans a safe lateral target position from the visible
+    traffic (free-gap selection with a reachability rule and a squeeze
+    fallback).
   * `PIDController` -- a PID controller (`compute_action`) with live-tunable
-    `kp`/`ki`/`kd` gains that drives the heading to the setpoint.
+    `kp`/`ki`/`kd` gains that drives the lateral offset to the setpoint.
   * `train_rl_agent`, `load_rl_agent`, `get_rl_action` -- train/load a
     Stable-Baselines3 PPO agent and query it for actions.
 - **`racer_env.py`** is the Gymnasium-style environment, including the
@@ -124,25 +127,25 @@ same as the arrow keys, for trackpad/touch use.
 ### PID control
 
 Three sliders (Kp, Ki, Kd) let you tune the controller while it runs. Every
-step, `compute_desired_heading` produces the setpoint:
+step, `compute_desired_offset` produces the setpoint:
 
-- **Obstacles off:** the desired heading gently points the car back towards
-  the middle of the lane, so the controller keeps it driving forward and
-  centred despite the drift and slippage.
-- **Obstacles on:** the controller plans a safe *lateral target* from the
-  visible traffic and turns the lateral error into a desired heading. Each
-  visible car blocks a band of lateral positions; the lane line of a car
-  that is already close can no longer be crossed (we stay on our side of
-  it); the controller aims for the nearest free gap, and if no gap is free
-  it squeezes towards whichever reachable extreme has the most room. The
-  observation provides the obstacle bearings, and the `info` dict provides
-  the same cars as relative `(dx, dy)` positions for the planner -- the
-  classical controller gets richer telemetry than the RL agent, just as it
-  already uses `lateral_offset` in obstacles-off mode.
+- **Obstacles off:** the desired offset is the centre line itself (`0.0`),
+  so the controller keeps the car centred despite the drift and slippage.
+- **Obstacles on:** the controller plans a safe *lateral target position*
+  from the visible traffic. Each visible car blocks a band of lateral
+  positions; the lane line of a car that is already close can no longer be
+  crossed (we stay on our side of it); the controller aims for the nearest
+  free gap, and if no gap is free it squeezes towards whichever reachable
+  extreme has the most room. The observation provides the obstacle bearings,
+  and the `info` dict provides the same cars as relative `(dx, dy)`
+  positions for the planner -- the classical controller gets richer
+  telemetry than the RL agent.
 
-The PID controller then steers the heading to that setpoint. Try
-`Kp=3, Ki=0, Kd=0.4` as a starting point, then experiment. `R` resets the
-episode immediately, `Esc` returns to the menu.
+The PID controller then steers the car's lateral offset to that setpoint.
+Because steering acts on the heading (which in turn moves the car sideways),
+a purely proportional controller oscillates -- the derivative term provides
+the damping. Try `Kp=0.6, Ki=0, Kd=0.35` as a starting point, then
+experiment. `R` resets the episode immediately, `Esc` returns to the menu.
 
 ### Reinforcement learning control
 
@@ -156,9 +159,10 @@ episode immediately, `Esc` returns to the menu.
   model** or **train a new one** (overwriting the checkpoint).
 - After training/loading, the trained agent drives the car in the renderer.
 
-Note that the obstacles-on observation only contains *angles* (no
-distances), which makes it a genuinely interesting -- and partially
-observable -- RL problem.
+Note that the agent never observes the car's heading or the obstacle
+distances -- only the centre-line offset and (in obstacles-on mode) the
+obstacle bearings -- which makes it a genuinely interesting, and partially
+observable, RL problem.
 
 ## Notebooks: implement the algorithms yourself
 
@@ -170,7 +174,7 @@ yourself):
    markdown cell explaining how it works and step-by-step implementation
    instructions, followed by a code cell with the function/class signature
    but the body left as `# YOUR CODE HERE` / `raise NotImplementedError`.
-2. Implement `get_manual_action`, `compute_desired_heading`,
+2. Implement `get_manual_action`, `compute_desired_offset`,
    `PIDController`, `train_rl_agent`, `load_rl_agent`, and `get_rl_action`.
 3. Run the **export cell** at the end of the notebook -- it writes your
    implementations to `../controllers.py`.

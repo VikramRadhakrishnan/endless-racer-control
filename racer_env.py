@@ -2,24 +2,26 @@
 A simple top-down "endless racer" environment in the style of Gymnasium.
 
 The car drives forward at a constant speed on an endless, vertically
-scrolling track. Random wheel slippage and random drift constantly perturb
-the car, so without external steering control it will not stay in a straight
-line. The agent's job is to steer.
+scrolling track. Small random drift perturbs the car every step, and every
+so often the wheels *slip*: steering effectiveness drops and the car drifts
+to the left or right of the centre line until grip returns. Without external
+steering control the car will not stay on the track. The agent's job is to
+steer.
 
 Two modes:
 
-- **Obstacles off** -- the observation is just the car's heading angle
-  ``[theta]`` (rad, 0 = straight up the track, positive = pointing right).
+- **Obstacles off** -- the observation is the car's distance from the centre
+  line ``[offset]`` (m, 0 = lane centre, positive = right of centre).
 - **Obstacles on** -- slower "traffic" cars appear ahead and must be dodged.
-  The observation is ``[theta, angle_1, ..., angle_N]`` where ``angle_i`` is
+  The observation is ``[offset, angle_1, ..., angle_N]`` where ``angle_i`` is
   the bearing from the car to the i-th visible obstacle (sorted nearest
   first, positive = obstacle is to the right). Unused slots are padded with
   the sentinel ``NO_OBSTACLE_ANGLE`` (= pi, i.e. "directly behind", which a
   visible obstacle can never be).
 
-Reward is the forward distance travelled each step. Colliding with the lane
-edges (or an obstacle, in obstacles-on mode) ends the episode with a negative
-reward as a penalty.
+The goal is to stay on the track as long as possible: the reward is +1 for
+every step the car survives. Colliding with the lane edges (or an obstacle,
+in obstacles-on mode) ends the episode with a negative reward as a penalty.
 
 Extra quantities useful for control (e.g. the car's lateral offset from the
 lane centre) are reported in the ``info`` dict returned by ``reset``/``step``.
@@ -48,7 +50,9 @@ HEADING_NOISE_STD = 0.02      # random drift in heading per step (rad)
 LATERAL_NOISE_STD = 0.03      # random lateral drift per step (m)
 SLIP_PROB = 0.02              # chance per step that the wheels start slipping
 SLIP_DURATION_RANGE = (5, 15)   # slip lasts this many steps (uniform)
-SLIP_GRIP_RANGE = (0.15, 0.5)    # steering effectiveness while slipping
+SLIP_GRIP_RANGE = (0.25, 0.6)    # steering effectiveness while slipping
+SLIP_DRIFT_RATE_RANGE = (0.2, 0.6)  # heading drift rate while slipping (rad/s),
+                                    # applied towards a random side (left/right)
 
 # Obstacles (only used in obstacles-on mode)
 VIEW_DISTANCE = 60.0          # how far ahead obstacles are visible (m)
@@ -74,8 +78,9 @@ class EndlessRacerEnv(gym.Env):
     Parameters
     ----------
     obstacles : bool
-        ``False``: observation is ``[theta]``.
-        ``True``: observation is ``[theta, angle_1, ..., angle_N]`` with
+        ``False``: observation is ``[offset]`` (distance from the centre
+        line, positive = right of centre).
+        ``True``: observation is ``[offset, angle_1, ..., angle_N]`` with
         ``N = MAX_VISIBLE_OBSTACLES`` slots padded by ``NO_OBSTACLE_ANGLE``.
     render_mode : str or None
         ``"human"`` opens a standalone Tkinter window; ``None`` disables
@@ -95,10 +100,14 @@ class EndlessRacerEnv(gym.Env):
             low=-1.0, high=1.0, shape=(1,), dtype=np.float32
         )
 
+        # Observation: [offset] or [offset, angle_1, ..., angle_N].
+        # The first entry is the distance from the centre line (m), the
+        # remaining entries (obstacles-on only) are obstacle bearings (rad).
         obs_dim = 1 + (MAX_VISIBLE_OBSTACLES if self.obstacles_on else 0)
-        self.observation_space = spaces.Box(
-            low=-math.pi, high=math.pi, shape=(obs_dim,), dtype=np.float32
-        )
+        low = np.full(obs_dim, -math.pi, dtype=np.float32)
+        high = np.full(obs_dim, math.pi, dtype=np.float32)
+        low[0], high[0] = -LANE_HALF_WIDTH, LANE_HALF_WIDTH
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
         self.dt = DT
 
@@ -109,6 +118,7 @@ class EndlessRacerEnv(gym.Env):
         self.steps = 0
         self._slip_steps_left = 0
         self._grip = 1.0
+        self._slip_drift = 0.0  # heading drift rate (rad/s) while slipping
         self._obstacles = []    # list of dicts: {"x", "y", "speed"} (y = metres ahead)
         self._next_spawn_y = 0.0
 
@@ -126,6 +136,7 @@ class EndlessRacerEnv(gym.Env):
         self.steps = 0
         self._slip_steps_left = 0
         self._grip = 1.0
+        self._slip_drift = 0.0
         self._obstacles = []
         self._next_spawn_y = VIEW_DISTANCE * 0.75
         if self.obstacles_on:
@@ -144,16 +155,25 @@ class EndlessRacerEnv(gym.Env):
         steer = float(action[0])
 
         # --- random wheel slippage -------------------------------------
+        # Every so often the wheels lose grip: steering effectiveness drops
+        # and the car drifts towards a random side (left or right) of the
+        # centre line until grip returns.
         if self._slip_steps_left > 0:
             self._slip_steps_left -= 1
             if self._slip_steps_left == 0:
                 self._grip = 1.0
+                self._slip_drift = 0.0
         elif self.np_random.random() < SLIP_PROB:
             self._slip_steps_left = int(self.np_random.integers(*SLIP_DURATION_RANGE))
             self._grip = float(self.np_random.uniform(*SLIP_GRIP_RANGE))
+            direction = 1.0 if self.np_random.random() < 0.5 else -1.0
+            self._slip_drift = direction * float(
+                self.np_random.uniform(*SLIP_DRIFT_RATE_RANGE)
+            )
 
         # --- car dynamics (+ random drift) ------------------------------
         self.theta += steer * MAX_STEER_RATE * self._grip * self.dt
+        self.theta += self._slip_drift * self.dt
         self.theta += self.np_random.normal(0.0, HEADING_NOISE_STD)
         self.theta = float(np.clip(self.theta, -MAX_HEADING, MAX_HEADING))
 
@@ -168,7 +188,7 @@ class EndlessRacerEnv(gym.Env):
             self._advance_obstacles(forward)
 
         # --- reward & termination ---------------------------------------
-        reward = forward
+        reward = 1.0  # +1 for every step the car stays on the track
         terminated = False
 
         if abs(self.x) + CAR_WIDTH / 2.0 >= LANE_HALF_WIDTH:
@@ -244,11 +264,12 @@ class EndlessRacerEnv(gym.Env):
     # Observation / info
     # ------------------------------------------------------------------
     def _get_obs(self):
+        offset = float(np.clip(self.x, -LANE_HALF_WIDTH, LANE_HALF_WIDTH))
         if not self.obstacles_on:
-            return np.array([self.theta], dtype=np.float32)
+            return np.array([offset], dtype=np.float32)
         angles = self.obstacle_angles()[:MAX_VISIBLE_OBSTACLES]
         padded = angles + [NO_OBSTACLE_ANGLE] * (MAX_VISIBLE_OBSTACLES - len(angles))
-        return np.array([self.theta] + padded, dtype=np.float32)
+        return np.array([offset] + padded, dtype=np.float32)
 
     def _get_info(self):
         visible = self.visible_obstacles() if self.obstacles_on else []
@@ -257,6 +278,7 @@ class EndlessRacerEnv(gym.Env):
             "heading": self.theta,
             "distance": self.distance,
             "grip": self._grip,
+            "slip_drift": self._slip_drift,
             "num_visible_obstacles": len(visible),
             # Relative (dx, dy) of each visible traffic car, nearest first
             # (same order as the angles in the observation). dx > 0 means the
@@ -331,9 +353,10 @@ class EndlessRacerEnv(gym.Env):
             text=f"distance: {self.distance:7.1f} m",
         )
         if self._grip < 1.0:
+            arrow = "→" if self._slip_drift > 0 else "←"
             canvas.create_text(
                 8, 26, anchor="nw", fill="#ffd60a", font=("Helvetica", 10, "bold"),
-                text="!! wheel slip !!",
+                text=f"!! wheel slip {arrow} !!",
             )
 
     @staticmethod

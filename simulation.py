@@ -8,8 +8,8 @@ random wheel slippage and drift -- with three control modes:
 1. Manual control  -- steer the car with the arrow keys.
 2. PID control     -- a PID controller steers the car; tune Kp/Ki/Kd live
                        with sliders. With obstacles on, the PID setpoint
-                       (desired heading) is computed from the bearings of
-                       the visible obstacles.
+                       (desired lateral offset) is computed from the
+                       positions of the visible obstacles.
 3. RL control      -- train (or load) a Stable-Baselines3 PPO agent and
                        watch it drive.
 
@@ -33,7 +33,7 @@ import racer_env
 from racer_env import EndlessRacerEnv
 from controllers import (
     PIDController,
-    compute_desired_heading,
+    compute_desired_offset,
     get_manual_action,
     get_rl_action,
     load_rl_agent,
@@ -143,8 +143,9 @@ class RacerSimulatorApp:
         tk.Label(
             frame,
             text=(
-                "A top-down endless racer with random wheel slippage and\n"
-                "drift. Keep the car in the lane -- and out of the traffic."
+                "A top-down endless racer. Random wheel slippage makes the\n"
+                "car drift left or right of the centre line. Stay on the\n"
+                "track as long as you can -- and out of the traffic."
             ),
             justify="center",
         ).pack(pady=(0, 14))
@@ -286,20 +287,20 @@ class RacerSimulatorApp:
     # ------------------------------------------------------------------
     def show_pid_mode(self):
         def controls(panel):
-            self.kp_var = tk.DoubleVar(value=3.0)
+            self.kp_var = tk.DoubleVar(value=0.6)
             self.ki_var = tk.DoubleVar(value=0.0)
-            self.kd_var = tk.DoubleVar(value=0.4)
+            self.kd_var = tk.DoubleVar(value=0.35)
             for label, var, hi in (
-                ("Kp", self.kp_var, 10.0),
-                ("Ki", self.ki_var, 5.0),
-                ("Kd", self.kd_var, 2.0),
+                ("Kp", self.kp_var, 2.0),
+                ("Ki", self.ki_var, 1.0),
+                ("Kd", self.kd_var, 1.0),
             ):
                 tk.Label(panel, text=label).pack()
                 tk.Scale(
                     panel, variable=var, from_=0.0, to=hi, resolution=0.01,
                     orient="horizontal", length=200,
                 ).pack()
-            self.setpoint_var = tk.StringVar(value="desired heading: +0.000")
+            self.setpoint_var = tk.StringVar(value="desired offset: +0.00 m")
             tk.Label(panel, textvariable=self.setpoint_var, fg="grey").pack(pady=(6, 0))
 
         self._build_sim_screen("PID Control", controls)
@@ -313,11 +314,11 @@ class RacerSimulatorApp:
 
     def _pid_loop(self):
         self.pid.set_gains(self.kp_var.get(), self.ki_var.get(), self.kd_var.get())
-        desired = compute_desired_heading(
+        desired = compute_desired_offset(
             self.obs, self.info, self.obstacles_var.get()
         )
         self.pid.set_setpoint(desired)
-        self.setpoint_var.set(f"desired heading: {desired:+.3f}")
+        self.setpoint_var.set(f"desired offset: {desired:+.2f} m")
         action = self.pid.compute_action(self.obs, self.env.action_space, self.env.dt)
         if self._common_step(action, self._restart_pid):
             self.after_id = self.root.after(STEP_DELAY_MS, self._pid_loop)

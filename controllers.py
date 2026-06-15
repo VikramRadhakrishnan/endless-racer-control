@@ -9,18 +9,22 @@ cells.
 
 Environment recap
 ------------------
-- Observation (obstacles off): ``[theta]``
-    - ``theta``: car heading angle (rad, 0 = straight ahead, positive = right)
-- Observation (obstacles on): ``[theta, angle_1, ..., angle_N]``
+- Observation (obstacles off): ``[offset]``
+    - ``offset``: distance from the centre line (m, 0 = lane centre,
+      positive = right of centre)
+- Observation (obstacles on): ``[offset, angle_1, ..., angle_N]``
     - ``angle_i``: bearing to the i-th visible obstacle, nearest first
       (positive = obstacle is to the right). Unused slots are padded with
       the sentinel ``NO_OBSTACLE_ANGLE`` (= pi).
 - Action: a single steering command, ``Box(-1.0, 1.0, (1,))``
   (negative = steer left, positive = steer right).
-- Reward: forward distance travelled per step; a large negative penalty on
-  collision with the lane edges or an obstacle (which ends the episode).
-- ``info`` dict: includes ``lateral_offset`` (m from the lane centre), used
-  to compute the desired heading.
+- Reward: +1 per step the car stays on the track; a large negative penalty
+  on collision with the lane edges or an obstacle (which ends the episode).
+- Disturbances: random drift each step, plus occasional wheel slippage during
+  which steering effectiveness drops and the car drifts left or right.
+- ``info`` dict: includes (in obstacles-on mode) ``"obstacles"``, the
+  relative ``(dx, dy)`` positions of the visible traffic cars, used by the
+  classical planner.
 """
 
 import math
@@ -28,7 +32,7 @@ import os
 
 import numpy as np
 
-from racer_env import MAX_HEADING, NO_OBSTACLE_ANGLE
+from racer_env import NO_OBSTACLE_ANGLE
 
 
 # ---------------------------------------------------------------------------
@@ -63,37 +67,30 @@ def get_manual_action(action_space, pressed_keys, magnitude=1.0):
 
 
 # ---------------------------------------------------------------------------
-# 2. Desired heading (the PID controller's setpoint)
+# 2. Desired lateral offset (the PID controller's setpoint)
 # ---------------------------------------------------------------------------
-def compute_desired_heading(
+def compute_desired_offset(
     observation,
     info,
     obstacles_on,
-    center_gain=0.12,
     plan_horizon=25.0,
     cross_lead=7.0,
     cross_per_m=2.0,
     clearance=2.2,
     corridor=4.5,
-    track_gain=0.25,
-    max_dodge=0.40,
 ):
-    """Compute the heading angle the car *should* have right now.
+    """Compute the lateral position the car *should* be at right now.
 
     Obstacles off
-        The goal is simply to drive forward in the middle of the lane, so the
-        desired heading steers gently back towards the lane centre:
-        ``-center_gain * lateral_offset`` (if the car has drifted right, the
-        desired heading points slightly left, and vice versa).
+        The goal is simply to drive in the middle of the lane, so the desired
+        offset is the centre line itself: ``0.0``.
 
     Obstacles on
-        The controller plans a safe *lateral target position* and converts the
-        lateral error into a desired heading. The observation's obstacle
-        bearings tell us where traffic is, and the ``info`` dict provides the
-        same cars as relative ``(dx, dy)`` positions (the classical controller
-        is allowed richer telemetry than the RL agent, just like it already
-        uses ``lateral_offset`` in obstacles-off mode). The plan has three
-        ingredients:
+        The controller plans a safe *lateral target position* from the
+        visible traffic. The observation's obstacle bearings tell us where
+        traffic is, and the ``info`` dict provides the same cars as relative
+        ``(dx, dy)`` positions (the classical controller is allowed richer
+        telemetry than the RL agent). The plan has three ingredients:
 
         1. *Reachability* -- we can only swerve so fast, so the lane line of a
            car that is already close cannot be crossed any more: we must stay
@@ -109,22 +106,17 @@ def compute_desired_heading(
            possible between us and nearby traffic by driving to whichever
            reachable extreme is farthest from the closest cars.
 
-        The lateral error is finally turned into a heading via a simple
-        proportional law, saturated at ``max_dodge`` so manoeuvres stay
-        controlled.
-
     Parameters
     ----------
     observation : array-like
-        The environment observation (see module docstring).
+        The environment observation; ``observation[0]`` is the car's current
+        distance from the centre line (m).
     info : dict
-        The ``info`` dict from ``env.step``/``env.reset``; must contain
-        ``"lateral_offset"`` and (in obstacles-on mode) ``"obstacles"``, a
-        list of relative ``(dx, dy)`` positions of the visible traffic cars.
+        The ``info`` dict from ``env.step``/``env.reset``; in obstacles-on
+        mode it must contain ``"obstacles"``, a list of relative ``(dx, dy)``
+        positions of the visible traffic cars.
     obstacles_on : bool
         Which mode the environment is in.
-    center_gain : float
-        How strongly the car is steered back to the lane centre (rad per m).
     plan_horizon : float
         Cars further ahead than this (m) are ignored by the planner.
     cross_lead, cross_per_m : float
@@ -134,20 +126,17 @@ def compute_desired_heading(
         Half-width (m) of the lateral band each car blocks.
     corridor : float
         Half-width (m) of the drivable corridor the planner uses.
-    track_gain : float
-        Proportional gain (rad per m) from lateral error to desired heading.
-    max_dodge : float
-        Saturation (rad) of the avoidance heading.
 
     Returns
     -------
     float
-        The desired heading angle (rad), clipped to ``+/- MAX_HEADING``.
+        The desired lateral offset (m from the centre line, positive =
+        right of centre).
     """
-    offset = info["lateral_offset"]
-
     if not obstacles_on:
-        return float(np.clip(-center_gain * offset, -MAX_HEADING, MAX_HEADING))
+        return 0.0
+
+    offset = float(observation[0])
 
     # Traffic cars as absolute lateral position + distance ahead.
     cars = [
@@ -176,7 +165,6 @@ def compute_desired_heading(
         free.append((lo, reach_hi))
     free = [(a, b) for a, b in free if b - a > 0.5 and b > reach_lo]
 
-    urgent = False
     if free:
         # Aim for the gap that needs the smallest lateral move.
         def move_needed(gap):
@@ -190,35 +178,35 @@ def compute_desired_heading(
         # Drift gently towards the middle of the gap for extra margin.
         target = 0.8 * target + 0.2 * (g_lo + g_hi) / 2.0
     else:
-        # 3. Squeeze: maximise room to the closest cars, at full urgency.
+        # 3. Squeeze: maximise room to the closest cars.
         close = [c for c in cars if c[1] < 15.0]
         if close:
             def room(p):
                 return min(abs(p - x) for x, _ in close)
 
             target = max((reach_lo, reach_hi), key=room)
-            urgent = True
         else:
             target = float(np.clip(offset, reach_lo, reach_hi))
 
-    gain = 0.5 if urgent else track_gain
-    desired = np.clip(gain * (target - offset), -max_dodge, max_dodge)
-    return float(np.clip(desired, -MAX_HEADING, MAX_HEADING))
+    return float(target)
 
 
 # ---------------------------------------------------------------------------
 # 3. PID control
 # ---------------------------------------------------------------------------
 class PIDController:
-    """A PID controller that steers the car's heading to ``setpoint``.
+    """A PID controller that steers the car's lateral offset to ``setpoint``.
 
-    The controller drives the heading angle ``theta`` (``observation[0]``)
-    to the desired heading by issuing a steering command:
+    The controller drives the distance from the centre line
+    (``observation[0]``) to the desired offset by issuing a steering command:
 
         u(t) = Kp * e(t) + Ki * integral(e) + Kd * d(e)/dt
 
-    where ``e(t) = setpoint(t) - theta(t)``. The setpoint is updated every
-    step by ``compute_desired_heading`` (lane centring / obstacle avoidance).
+    where ``e(t) = setpoint(t) - offset(t)``. The setpoint is updated every
+    step by ``compute_desired_offset`` (lane centring / obstacle avoidance).
+    Because steering controls the *heading* (and the heading in turn moves
+    the car sideways), the derivative term is essential for damping -- a
+    purely proportional controller will oscillate around the centre line.
     """
 
     def __init__(self, kp=0.0, ki=0.0, kd=0.0, setpoint=0.0):
@@ -240,7 +228,7 @@ class PIDController:
         self.kd = kd
 
     def set_setpoint(self, setpoint):
-        """Update the desired heading angle (rad)."""
+        """Update the desired lateral offset (m from the centre line)."""
         self.setpoint = setpoint
 
     def compute_action(self, observation, action_space, dt):
@@ -249,7 +237,8 @@ class PIDController:
         Parameters
         ----------
         observation : array-like
-            The environment observation; ``observation[0]`` is the heading.
+            The environment observation; ``observation[0]`` is the car's
+            distance from the centre line (m).
         action_space : gymnasium.spaces.Box
             The environment's action space, used to clip the output.
         dt : float
@@ -261,8 +250,8 @@ class PIDController:
         numpy.ndarray
             The action to send to ``env.step``, clipped to ``action_space``.
         """
-        theta = observation[0]
-        error = self.setpoint - theta
+        offset = observation[0]
+        error = self.setpoint - offset
 
         self._integral += error * dt
         derivative = (error - self._prev_error) / dt if dt > 0 else 0.0
