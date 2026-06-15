@@ -66,8 +66,11 @@ observation.
   * `train_rl_agent`, `load_rl_agent`, `get_rl_action` -- train/load a
     Stable-Baselines3 PPO agent and query it for actions.
 - **`racer_env.py`** is the Gymnasium-style environment, including the
-  simple top-down Tkinter rendering (scrolling lane markings, blue player
-  car, red traffic cars).
+  simple top-down Tkinter rendering. The camera is fixed on the lane
+  (vertically scrolling lane markings); the blue player car slides left and
+  right **across the lane to show its lateral offset** from the centre line,
+  and red traffic cars are drawn at their absolute lateral positions. Without
+  control the player car visibly drifts toward a lane edge and crashes.
 - **`simulation.py`** is the Tkinter application: the main menu (with the
   obstacles on/off toggle), the three mode screens, the simulation step loop
   (driven by `root.after`), and RL training/checkpoint management.
